@@ -1,0 +1,190 @@
+---
+title: "Weight Lifting Exercise Prediction"
+author: OC
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.height = 3.2, fig.width = 5, cache=TRUE)
+```
+
+## Overview
+The goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell to predict the manner of exercise of 6 participants.
+
+In order to make a prediction, the follow steps are performed:
+
+* Clean data
+* Create training and verification sets
+* Train using random forests
+* Train using gradient boosting
+* Use the more accurate model (random forest vs gradient boosting)
+* Predict
+
+## Data
+The data for this project comes from [Qualitative Activity Recognition of Weight Lifting Exercise](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201).
+
+The training data is [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). The test data is [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+The outcome variable `classe` is based on 5 levels (for performing biceps curls):
+
+* Class A - exactly according to the specification
+* Class B - throwing the elbows to the front 
+* Class C - lifting the dumbbell only halfway
+* Class D - lowering the dumbbell only halfway
+* Class E - throwing the hips to the front
+
+## Cleaning the Data
+```{r loadLibraries, message=FALSE, warning=FALSE}
+# load libraries to be used in the analysis
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(parallel)
+library(doParallel)
+```
+
+```{r readfile}
+training <- read.csv("data/pml-training.csv")
+testing <- read.csv("data/pml-testing.csv")
+```
+
+According to the [dataset documentation](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf):
+
+> In each step of the sliding window approach we calculated features on the Euler angles (roll, pitch and yaw), as well as the raw accelerometer, gyroscope and magnetometer readings. For the Euler angles of each of the four sensors we calculated eight features: mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness, generating in total 96 derived feature sets.
+
+To achieve the most accurate predictions, we'll ignore the derived data and just use the raw data.
+
+```{r}
+# remove the derived data fields
+training_clean <- training %>% 
+  select(-matches("^(avg).*$|^(var).*$|^(stddev).*$|^(max).*$")) %>%
+  select(-matches("^(min).*$|^(amplitude).*$|^(kurtosis).*$")) %>%
+  select(-matches("^(skewness).*$"))
+
+testing_clean <- testing %>%
+  select(-matches("^(avg).*$|^(var).*$|^(stddev).*$|^(max).*$")) %>%
+  select(-matches("^(min).*$|^(amplitude).*$|^(kurtosis).*$")) %>%
+  select(-matches("^(skewness).*$"))
+```
+
+There are an additional 7 columns that are not raw sensor data. These will also be removed
+
+* X
+* user_name
+* raw_timestamp_part_1
+* raw_timestamp_part_2
+* cvtd_timestamp
+* new_window
+* num_window
+
+```{r}
+# remove non-necessary columns (1:7)
+training_clean[,c(1:7)] = NULL
+testing_clean[,c(1:7)] = NULL
+```
+
+Verify the clean training and test data has no NA values.
+
+```{r}
+sum(is.na(training_clean))
+sum(is.na(testing_clean))
+```
+
+
+## Training
+We will split the clean training data into an 80-20 split to create training and testing/verification sets.
+
+```{r}
+set.seed(2222)
+inTrain <- createDataPartition(training_clean$classe, p=0.80, list=FALSE)
+tc_train <- training_clean[inTrain,]
+tc_test <- training_clean[-inTrain,]
+```
+
+Since training using random forests can be slow, we will enable parallel processing. The sequence was shown in the [course discussion forums](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md).
+
+As stated in the linked document:
+
+> ...one of the key advantages of the caret package: its ability to estimate an out of sample error by aggregating the accuracy analysis across a series of training runs. This is because caret automates the process of fitting multiple versions of a given model by varying its parameters and/or folds within a resampling / cross-validation process.
+
+```{r train}
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+# specify resampling parameters
+fitControl <- trainControl(method="cv", number = 10, allowParallel=T)
+
+# train using random forest
+set.seed(2222)
+rf <- train(classe ~ ., data=tc_train, method="rf", trControl=fitControl)
+
+# train using gradient boost
+set.seed(2222)
+gbm <- train(classe ~ ., data=tc_train, method="gbm", verbose=F)
+
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+Let's look at the training results for the random forest model.
+```{r}
+confusionMatrix.train(rf)
+ggplot(rf) + ggtitle("Random Forest Accuracy")
+```
+
+The estimated accuracy is 99.32%. **The expected out of sample error is thus 0.68%.** Random forests look very promising.
+
+Let's look at the training results for the gradient boosting model.
+
+```{r}
+confusionMatrix.train(gbm)
+ggplot(gbm) + ggtitle("Gradient Boosting Accuracy")
+```
+
+The estimated accuracy is 95.86%. **The expected out of sample error is thus 4.14%.** Gradient boosting is good, but not as good as random forests.
+
+Now, we will make a prediction with our validation data set and compare between the two models.
+
+```{r}
+# random forest
+rf.predict <- predict(rf, newdata = tc_test)
+rf.cm <- confusionMatrix(data=rf.predict, tc_test$classe)
+rf.cm$overall
+```
+
+```{r}
+# gradient boosting
+gbm.predict <- predict(gbm, newdata = tc_test)
+gbm.cm <- confusionMatrix(data=gbm.predict, tc_test$classe)
+gbm.cm$overall
+```
+
+As we can see, the random forest method was 99.67% accurate. This makes the **out of sample error to be 0.33%.**  
+
+Gradient boosting was 96.71% accurate. This makes the **out of sample error to be 3.29%.**  
+
+| | Random Forest | Gradient Boosting |
+| --- | ---: | ---: |
+| Est. Accuracy | 99.32% | 95.86% | 
+| Est. Out of Sample Error | 0.68% | 4.14% |
+| Actual Accuracy | 99.67% | 96.71% |
+| Actual Out of Sample Error | 0.33% | 3.29% |
+
+Random forests are the winner for our prediction model. Out of curiousity, let's take a look which variables were the most influential.
+
+```{r}
+topVars <- varImp(rf)$importance %>% 
+  mutate(names=row.names(.)) %>% 
+  arrange(-Overall)
+head(topVars,10)
+```
+
+## Predicting the Test Set
+Now, we can use the given test set to predict the 20 different test cases.
+
+```{r}
+test.predict <- predict(rf, newdata=testing_clean)
+rbind(1:20,as.character(test.predict))
+```
+
